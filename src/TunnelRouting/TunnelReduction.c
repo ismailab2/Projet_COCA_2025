@@ -1,6 +1,7 @@
 #include "TunnelReduction.h"
 #include "Z3Tools.h"
 #include "stdio.h"
+#include <stdlib.h>
 
 /**
  * @brief Creates the variable "x_{node,pos,stack_height}" of the reduction (described in the subject).
@@ -63,6 +64,81 @@ Z3_ast tn_reduction(Z3_context ctx, const TunnelNetwork network, int length)
 {
     return Z3_mk_false(ctx);
 }
+
+
+
+/*les debut d'implementation des conditions de reduction des tunnels vers SAT
+** chaque condition est implementé par une fonction expecifique a l'exception du 
+**condition initial et final*/
+
+/*----------------- implementation du condition initial et final -------------------------------------------
+------------------- Condition initiale : on commence au nœud initial avec une pile vide (hauteur = 0) -------
+------------------- Condition finale : on termine au nœud final avec une pile vide (hauteur = 0)------------*/
+
+Z3_ast tn_condition_initial_and_final(Z3_context ctx, const TunnelNetwork network, int length){
+
+    // nombres des noeuds du reseaux
+    int nombre_noeud = tn_get_num_nodes(network);
+
+    //la hauteur maximal
+    int h_max = get_stack_size(length);
+
+    // condition  initial
+    int initial_noeud = tn_get_initial(network);
+
+    // un tableau dynamique pour stocker les contraintes logiques Z3.
+    Z3_ast *contrainte_initial = malloc(sizeof(Z3_ast)*nombre_noeud*h_max);
+
+    int indice = 0;
+    contrainte_initial[indice++]  = tn_path_variable(ctx,  initial_noeud,  0, 0);
+
+    for(int n=0; n<nombre_noeud; n++){
+        for(int h = 0 ; h<h_max; h++){
+            if (!(n==initial_noeud && h ==0)){
+                contrainte_initial[indice++]  = Z3_mk_not(ctx, tn_path_variable(ctx, n, 0, h));
+            }
+        }
+
+    }
+
+    Z3_ast init_formul = Z3_mk_and(ctx, indice, contrainte_initial);
+
+    // 🔹 Libère la mémoire temporaire du tableau de contraintes.
+    free(contrainte_initial);
+
+
+    //condition final
+        // noeud initial
+    int final_noeud = tn_get_final(network);
+
+    // un tableau dynamique pour stocker les contraintes logiques Z3.
+    Z3_ast *contrainte_finale = malloc(sizeof(Z3_ast)*nombre_noeud*h_max);
+
+    int indicef = 0;
+    contrainte_finale[indicef++]  = tn_path_variable(ctx,  final_noeud,  0, 0);
+
+    for(int n=0; n<nombre_noeud; n++){
+        for(int h = 0 ; h<h_max; h++){
+            if (!(n==final_noeud && h ==0)){
+                contrainte_finale[indicef++]  = Z3_mk_not(ctx, tn_path_variable(ctx, n, 0, h));
+            }
+        }
+
+    }
+
+    Z3_ast final_formul = Z3_mk_and(ctx, indicef, contrainte_finale);
+
+    free(contrainte_finale);
+
+    Z3_ast cond_init_final[2] = {init_formul, final_formul};
+
+    return Z3_mk_and(ctx, 2, cond_init_final);
+
+}
+
+
+
+
 
 void tn_get_path_from_model(Z3_context ctx, Z3_model model, TunnelNetwork network, int bound, tn_step *path)
 {
