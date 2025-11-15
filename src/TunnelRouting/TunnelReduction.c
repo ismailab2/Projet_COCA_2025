@@ -166,6 +166,7 @@ Z3_ast tn_condition_uniqueness(Z3_context ctx, const TunnelNetwork network, int 
 
     for (int pos = 0; pos <= length; ++pos) {
         // au moins un : OR_(n,h) x_(n,pos,h)
+        //X(n1​,pos,h1​)∨X(n2​,pos,h2​)∨⋯∨X(nN​,pos,hH​)
         Z3_ast *or_args = malloc(sizeof(Z3_ast) * (N * H));
         int oi = 0;
         for (int n = 0; n < N; ++n)
@@ -178,8 +179,9 @@ Z3_ast tn_condition_uniqueness(Z3_context ctx, const TunnelNetwork network, int 
         for (int n1 = 0; n1 < N; ++n1) {
             for (int h1 = 0; h1 < H; ++h1) {
                 for (int n2 = n1; n2 < N; ++n2) {
-                    int h2start = (n1 == n2) ? h1 + 1 : 0;
+                    int h2start = (n1 == n2) ? h1 + 1 : 0; //on evite les doublons (i,j) et (j,i)
                     for (int h2 = h2start; h2 < H; ++h2) {
+                        //¬(X(n1​,pos,h1​)∧X(n2​,pos,h2​))
                         Z3_ast a = tn_path_variable(ctx, n1, pos, h1);
                         Z3_ast b = tn_path_variable(ctx, n2, pos, h2);
                         Z3_ast both = Z3_mk_and(ctx, 2, (Z3_ast[]){a, b});
@@ -238,6 +240,8 @@ Z3_ast tn_condition_edges(Z3_context ctx, const TunnelNetwork network, int lengt
                 Z3_ast allowed = Z3_mk_or(ctx, ni, nexts);
                 free(nexts);
 
+                //X(u,pos,h)⇒(X(v1​,pos+1,h1​)∨⋯∨X(vk​,pos+1,hm​))
+
                 conjs[ci++] = Z3_mk_implies(ctx, premise, allowed);
             }
         }
@@ -254,8 +258,10 @@ Z3_ast tn_condition_edges(Z3_context ctx, const TunnelNetwork network, int lengt
  * @param network.
  * @param length la longueur du chemin.
  * @return Z3_ast
- * -------------------------------- coherence du contenu du pile --------------------
- * ----------------- Jamais 4 et 6 en même temps sur une même postion du pile ------------*/
+ * -------------------------------- coherence du contenu du pile --------------------------------------------------
+ * ----------------- interdit d’avoir a la fois une plaque IPv4 ET IPv6 au meme emplacement------------------------
+ * ----------------- Si un niveau h est vide, alors tous les niveaux au-dessus doivent aussi être vides.------------*/
+
 Z3_ast tn_condition_stack_wellformed(Z3_context ctx, int length)
 {
     int H = get_stack_size(length);
@@ -266,11 +272,12 @@ Z3_ast tn_condition_stack_wellformed(Z3_context ctx, int length)
 
     for (int pos = 0; pos <= length; ++pos) {
         for (int h = 0; h < H; ++h) {
-            // ¬(y4_pos_h ∧ y6_pos_h) 
+            // ¬(4(pos,h)∧6(pos,h))
             Z3_ast both = Z3_mk_and(ctx, 2, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_6_variable(ctx, pos, h)});
             conjs[ci++] = Z3_mk_not(ctx, both);
 
             // si case h vide => toutes les cases >h vides 
+            //empty(pos,h)=¬4(pos,h)∧¬6(pos,h)
             Z3_ast not4 = Z3_mk_not(ctx, tn_4_variable(ctx, pos, h));
             Z3_ast not6 = Z3_mk_not(ctx, tn_6_variable(ctx, pos, h));
             Z3_ast empty_h = Z3_mk_and(ctx, 2, (Z3_ast[]){not4, not6});
@@ -297,7 +304,7 @@ Z3_ast tn_condition_stack_wellformed(Z3_context ctx, int length)
  * @param network.
  * @param length la longueur du chemin.
  * @return Z3_ast
- * ----------- Si (n,pos,h) est vrai alors la cellule (pos,h) est occupée par (y4 ou y6).
+ * ----------- Si x(n,pos,h) est vrai alors la cellule (pos,h) est occupée par (y4 ou y6).
  * ------------------ Ceci garantit l'absence d'incohérence ------------------------------*/
 
 Z3_ast tn_condition_occupancy(Z3_context ctx, const TunnelNetwork network, int length)
@@ -311,9 +318,11 @@ Z3_ast tn_condition_occupancy(Z3_context ctx, const TunnelNetwork network, int l
 
     for (int pos = 0; pos <= length; ++pos) {
         for (int h = 0; h < H; ++h) {
+            //occ(pos,h)=4(pos,h)∨6(pos,h)
             Z3_ast occ = Z3_mk_or(ctx, 2, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_6_variable(ctx, pos, h)});
             for (int n = 0; n < N; ++n) {
                 Z3_ast nth = tn_path_variable(ctx, n, pos, h);
+                //x(n,pos,h)⇒occ(pos,h)
                 conjs[ci++] = Z3_mk_implies(ctx, nth, occ);
             }
         }
@@ -349,11 +358,12 @@ Z3_ast tn_condition_actions(Z3_context ctx, const TunnelNetwork network, int len
 
                 Z3_ast cur = tn_path_variable(ctx, n, pos, h);
 
-                /* itèration sur toutes les paires (m, hp) possibles pour pos+1.
+                /* itèration sur toutes les paires (m, hp) possibles pour la position pos+1.
                    pour chaque paire on construit une implication avec l'antécédent */
                 for (int m = 0; m < N; ++m) {
                     for (int hp = 0; hp < H; ++hp) {
                         Z3_ast nxt = tn_path_variable(ctx, m, pos + 1, hp);
+                        //cur(n,pos,h)∧nxt(m,pos+1,hp)
                         Z3_ast antecedent = Z3_mk_and(ctx, 2, (Z3_ast[]){cur, nxt});
 
                         // construire les cas permis
