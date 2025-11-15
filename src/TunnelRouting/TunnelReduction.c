@@ -2,6 +2,7 @@
 #include "Z3Tools.h"
 #include "stdio.h"
 #include <stdlib.h>
+#include <assert.h>
 
 /**
  * @brief Creates the variable "x_{node,pos,stack_height}" of the reduction (described in the subject).
@@ -34,6 +35,9 @@ Z3_ast tn_4_variable(Z3_context ctx, int pos, int height)
     return mk_bool_var(ctx, name);
 }
 
+
+
+
 /**
  * @brief Creates the variable "y_{pos,height,6}" of the reduction (described in the subject).
  *
@@ -60,84 +64,411 @@ int get_stack_size(int length)
     return length / 2 + 1;
 }
 
+
+
+/**
+ * @brief on verifie s'il existe une arête entre (u,v)
+ */
+static int tn_has_edge_wrapper(const TunnelNetwork network, int u, int v)
+{
+    return tn_is_edge(network, u, v) ? 1 : 0;
+}
+
+
+/**
+ * @brief---------------------------------------------------------------------------------------------------------
+*------------------------------------------------------------------------------------------------------------
+*-------------les debut d'implementation des conditions de reduction des tunnels vers SAT :------------------
+*------------- Organisation : chaque famille de contraintes a sa propre fonction :---------------------------
+*------------- tn_condition_initial_and_final : conditions terminales et initiales (pile vide).--------------
+*------------- tn_condition_uniqueness : exactement une paire (node,height) vraie par position.--------------
+*------------- tn_condition_edges : contraintes de voisinage (suivant doit être voisin dans le graphe).------
+*------------- tn_condition_stack_wellformed : pas de double-occupation et pas de trous.---------------------
+*------------- tn_condition_occupancy : si le paquet est à (node,pos,h) alors la case pos,h est occupée.------
+*------------- tn_condition_actions : encode les opérations transmit/push/pop comme implications logiques.----
+*-------------------------------------------------------------------------------------------------------------
+*------------------------------------------------------------------------------------------------------------
+ *  @brief
+ *  @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * ----------------- implementation du condition initial et final -------------------------------------------
+ * ------------------- Condition initiale : on commence au nœud initial avec une pile vide (hauteur = 0) ------
+ * ------------------ Condition finale : on termine au nœud final avec une pile vide (hauteur = 0)------------
+ */
+
+Z3_ast tn_condition_initial_and_final(Z3_context ctx, const TunnelNetwork network, int length)
+{
+    int N = tn_get_num_nodes(network);
+    int H = get_stack_size(length);
+    int init = tn_get_initial(network);
+
+    // liste dynamique , maximum N*H contraintes
+    Z3_ast *init_list = malloc(sizeof(Z3_ast) * (N * H + 1));
+    int idx = 0;
+
+    // x_(init,0,0) est vrai 
+    init_list[idx++] = tn_path_variable(ctx, init, 0, 0);
+
+    // etvtoutes les autres paires (node, height) à pos 0 sont fausses 
+    for (int n = 0; n < N; ++n) {
+        for (int h = 0; h < H; ++h) {
+            if (!(n == init && h == 0)) {
+                init_list[idx++] = Z3_mk_not(ctx, tn_path_variable(ctx, n, 0, h));
+            }
+        }
+    }
+    Z3_ast init_form = Z3_mk_and(ctx, idx, init_list);
+    free(init_list);
+
+   
+    int fin = tn_get_final(network);
+    Z3_ast *final_list = malloc(sizeof(Z3_ast) * (N * H + 1));
+    int idxf = 0;
+
+    final_list[idxf++] = tn_path_variable(ctx, fin, length, 0);
+
+    for (int n = 0; n < N; ++n) {
+        for (int h = 0; h < H; ++h) {
+            if (!(n == fin && h == 0)) {
+                final_list[idxf++] = Z3_mk_not(ctx, tn_path_variable(ctx, n, length, h));
+            }
+        }
+    }
+    Z3_ast final_form = Z3_mk_and(ctx, idxf, final_list);
+    free(final_list);
+
+    Z3_ast both[2] = {init_form, final_form};
+    return Z3_mk_and(ctx, 2, both);
+}
+
+
+/**
+* @brief
+* @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * -------------------------------- Unicité à chaque position ----------------------------------------
+ * ------------------- a chaque position pos, exactement un couple (node,height) est vrai ------------
+ */
+
+Z3_ast tn_condition_uniqueness(Z3_context ctx, const TunnelNetwork network, int length)
+{
+    int N = tn_get_num_nodes(network);
+    int H = get_stack_size(length);
+
+    // Nous  accumulons les conjonctions dans un tableau dynamique 
+    int est_upper = (length + 1) * (1 + (N * H) + (N * H * (N * H - 1) / 2));
+    Z3_ast *conjs = malloc(sizeof(Z3_ast) * est_upper);
+    int ci = 0;
+
+    for (int pos = 0; pos <= length; ++pos) {
+        // au moins un : OR_(n,h) x_(n,pos,h)
+        Z3_ast *or_args = malloc(sizeof(Z3_ast) * (N * H));
+        int oi = 0;
+        for (int n = 0; n < N; ++n)
+            for (int h = 0; h < H; ++h)
+                or_args[oi++] = tn_path_variable(ctx, n, pos, h);
+        conjs[ci++] = Z3_mk_or(ctx, oi, or_args);
+        free(or_args);
+
+        // au plus un : pour chaque paire distincte i<j on interdit (vi and vj) 
+        for (int n1 = 0; n1 < N; ++n1) {
+            for (int h1 = 0; h1 < H; ++h1) {
+                for (int n2 = n1; n2 < N; ++n2) {
+                    int h2start = (n1 == n2) ? h1 + 1 : 0;
+                    for (int h2 = h2start; h2 < H; ++h2) {
+                        Z3_ast a = tn_path_variable(ctx, n1, pos, h1);
+                        Z3_ast b = tn_path_variable(ctx, n2, pos, h2);
+                        Z3_ast both = Z3_mk_and(ctx, 2, (Z3_ast[]){a, b});
+                        conjs[ci++] = Z3_mk_not(ctx, both);
+                    }
+                }
+            }
+        }
+    }
+
+    Z3_ast result = Z3_mk_and(ctx, ci, conjs);
+    free(conjs);
+    return result;
+}
+
+
+/**
+ * @brief
+* @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * -------------------------------- des arêtes bien definie ----------------------------------------
+ * ------------------ Si on est au nœud u a pos, alors le nœud v a pos+1 doit être un voisin. ------------*/
+
+Z3_ast tn_condition_edges(Z3_context ctx, const TunnelNetwork network, int length)
+{
+    int N = tn_get_num_nodes(network);
+    int H = get_stack_size(length);
+
+    int est_upper = length * N * H * (N * H + 1);
+    Z3_ast *conjs = malloc(sizeof(Z3_ast) * est_upper);
+    int ci = 0;
+
+    for (int pos = 0; pos < length; ++pos) {
+        for (int u = 0; u < N; ++u) {
+            for (int h = 0; h < H; ++h) {
+                Z3_ast premise = tn_path_variable(ctx, u, pos, h);
+
+                // contruction la disjonction des positions possibles au pas suivant 
+                Z3_ast *nexts = malloc(sizeof(Z3_ast) * (N * H));
+                int ni = 0;
+                for (int v = 0; v < N; ++v) {
+                    if (!tn_has_edge_wrapper(network, u, v)) continue;
+                    for (int hp = 0; hp < H; ++hp) {
+                        nexts[ni++] = tn_path_variable(ctx, v, pos + 1, hp);
+                    }
+                }
+
+                if (ni == 0) {
+                    conjs[ci++] = Z3_mk_not(ctx, premise);
+                    free(nexts);
+                    continue;
+                }
+
+                Z3_ast allowed = Z3_mk_or(ctx, ni, nexts);
+                free(nexts);
+
+                conjs[ci++] = Z3_mk_implies(ctx, premise, allowed);
+            }
+        }
+    }
+
+    Z3_ast result = Z3_mk_and(ctx, ci, conjs);
+    free(conjs);
+    return result;
+}
+
+/**
+ * @brief
+* @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * -------------------------------- coherence du contenu du pile --------------------
+ * ----------------- Jamais 4 et 6 en même temps sur une même postion du pile ------------*/
+Z3_ast tn_condition_stack_wellformed(Z3_context ctx, int length)
+{
+    int H = get_stack_size(length);
+
+    int est_upper = (length + 1) * (H + H * (H - 1) / 2);
+    Z3_ast *conjs = malloc(sizeof(Z3_ast) * est_upper);
+    int ci = 0;
+
+    for (int pos = 0; pos <= length; ++pos) {
+        for (int h = 0; h < H; ++h) {
+            // ¬(y4_pos_h ∧ y6_pos_h) 
+            Z3_ast both = Z3_mk_and(ctx, 2, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_6_variable(ctx, pos, h)});
+            conjs[ci++] = Z3_mk_not(ctx, both);
+
+            // si case h vide => toutes les cases >h vides 
+            Z3_ast not4 = Z3_mk_not(ctx, tn_4_variable(ctx, pos, h));
+            Z3_ast not6 = Z3_mk_not(ctx, tn_6_variable(ctx, pos, h));
+            Z3_ast empty_h = Z3_mk_and(ctx, 2, (Z3_ast[]){not4, not6});
+            for (int hp = h + 1; hp < H; ++hp) {
+                Z3_ast not4p = Z3_mk_not(ctx, tn_4_variable(ctx, pos, hp));
+                Z3_ast not6p = Z3_mk_not(ctx, tn_6_variable(ctx, pos, hp));
+                Z3_ast empty_hp = Z3_mk_and(ctx, 2, (Z3_ast[]){not4p, not6p});
+                conjs[ci++] = Z3_mk_implies(ctx, empty_h, empty_hp);
+            }
+        }
+    }
+
+    Z3_ast result = Z3_mk_and(ctx, ci, conjs);
+    free(conjs);
+    return result;
+}
+
+
+
+
+/**
+ * @brief
+* @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * ----------- Si (n,pos,h) est vrai alors la cellule (pos,h) est occupée par (y4 ou y6).
+ * ------------------ Ceci garantit l'absence d'incohérence ------------------------------*/
+
+Z3_ast tn_condition_occupancy(Z3_context ctx, const TunnelNetwork network, int length)
+{
+    int N = tn_get_num_nodes(network);
+    int H = get_stack_size(length);
+
+    int est_upper = (length + 1) * (N * H);
+    Z3_ast *conjs = malloc(sizeof(Z3_ast) * est_upper);
+    int ci = 0;
+
+    for (int pos = 0; pos <= length; ++pos) {
+        for (int h = 0; h < H; ++h) {
+            Z3_ast occ = Z3_mk_or(ctx, 2, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_6_variable(ctx, pos, h)});
+            for (int n = 0; n < N; ++n) {
+                Z3_ast nth = tn_path_variable(ctx, n, pos, h);
+                conjs[ci++] = Z3_mk_implies(ctx, nth, occ);
+            }
+        }
+    }
+
+    Z3_ast result = Z3_mk_and(ctx, ci, conjs);
+    free(conjs);
+    return result;
+}
+
+/**
+ * @brief
+* @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * ----------------- Conditions d’action (transmit/push/pop) --------------------------
+ * ------------------ Chaque action impose une relation entre :------------------------- 
+ * ----------------- node courant, node suivant, hauteur, contenu de pile 
+ */
+Z3_ast tn_condition_actions(Z3_context ctx, const TunnelNetwork network, int length)
+{
+    int N = tn_get_num_nodes(network);
+    int H = get_stack_size(length);
+
+    int est_upper = length * N * H * (N * H) * 2 + 1000;
+    Z3_ast *conjs = malloc(sizeof(Z3_ast) * est_upper);
+    int ci = 0;
+
+    for (int pos = 0; pos < length; ++pos) {
+        for (int n = 0; n < N; ++n) {
+            for (int h = 0; h < H; ++h) {
+
+                Z3_ast cur = tn_path_variable(ctx, n, pos, h);
+
+                /* itèration sur toutes les paires (m, hp) possibles pour pos+1.
+                   pour chaque paire on construit une implication avec l'antécédent */
+                for (int m = 0; m < N; ++m) {
+                    for (int hp = 0; hp < H; ++hp) {
+                        Z3_ast nxt = tn_path_variable(ctx, m, pos + 1, hp);
+                        Z3_ast antecedent = Z3_mk_and(ctx, 2, (Z3_ast[]){cur, nxt});
+
+                        // construire les cas permis
+                        Z3_ast cases[16];
+                        int nc = 0;
+
+                        // --- TRANSMIT (hp == h) ---
+                        if (hp == h) {
+                            if (tn_node_has_action(network, n, transmit_4)) {
+                                // pos,h == 4 && pos+1,h == 4 
+                                Z3_ast a = Z3_mk_and(ctx, 2, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_4_variable(ctx, pos + 1, h)});
+                                cases[nc++] = a;
+                            }
+                            if (tn_node_has_action(network, n, transmit_6)) {
+                                Z3_ast a = Z3_mk_and(ctx, 2, (Z3_ast[]){tn_6_variable(ctx, pos, h), tn_6_variable(ctx, pos + 1, h)});
+                                cases[nc++] = a;
+                            }
+                        }
+
+                        /* --- PUSH (hp == h + 1) --- */
+                        if (hp == h + 1 && hp < H) {
+                            // 4 possibilités (a,b) ∈ {4,6} × {4,6} */
+                            if (tn_node_has_action(network, n, push_4_4)) {
+                                // pos,h == 4 ; pos+1,h == 4 (below) ; pos+1,h+1 == 4 (new top) 
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_4_variable(ctx, pos + 1, h), tn_4_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                            if (tn_node_has_action(network, n, push_4_6)) {
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_4_variable(ctx, pos + 1, h), tn_6_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                            if (tn_node_has_action(network, n, push_6_4)) {
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_6_variable(ctx, pos, h), tn_4_variable(ctx, pos + 1, h), tn_4_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                            if (tn_node_has_action(network, n, push_6_6)) {
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_6_variable(ctx, pos, h), tn_6_variable(ctx, pos + 1, h), tn_6_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                        }
+
+                        // --- POP (hp == h - 1) ---
+                        if (hp + 1 == h && h >= 1) {
+                            // pop supprimme top b
+                            if (tn_node_has_action(network, n, pop_4_4)) {
+                                // top b = 4 at pos,h ; below a = 4 at pos,h-1 ; new top at pos+1,h-1 = 4 
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_4_variable(ctx, pos, h - 1), tn_4_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                            if (tn_node_has_action(network, n, pop_4_6)) {
+                                // pop_4_6 means below a=4, top b=6 
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_6_variable(ctx, pos, h), tn_4_variable(ctx, pos, h - 1), tn_4_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                            if (tn_node_has_action(network, n, pop_6_4)) {
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_4_variable(ctx, pos, h), tn_6_variable(ctx, pos, h - 1), tn_6_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                            if (tn_node_has_action(network, n, pop_6_6)) {
+                                Z3_ast c = Z3_mk_and(ctx, 3, (Z3_ast[]){tn_6_variable(ctx, pos, h), tn_6_variable(ctx, pos, h - 1), tn_6_variable(ctx, pos + 1, hp)});
+                                cases[nc++] = c;
+                            }
+                        }
+
+                        // Si aucune case permise -> interdire l'antécédent
+                        if (nc == 0) {
+                            conjs[ci++] = Z3_mk_not(ctx, antecedent);
+                        } else {
+                            Z3_ast disj = Z3_mk_or(ctx, nc, cases);
+                            conjs[ci++] = Z3_mk_implies(ctx, antecedent, disj);
+                        }
+                    } 
+                }     
+            }        
+        }             
+    }                 
+
+    Z3_ast result = Z3_mk_and(ctx, ci, conjs);
+    free(conjs);
+    return result;
+}
+
+/**
+ * @brief
+* @param ctx The solver context.
+ * @param network.
+ * @param length la longueur du chemin.
+ * @return Z3_ast
+ * -----------------------------------------------------------------------------------------------------
+*-----construction complète de la formule Z3 représentant la réduction TUNNEL -> SAT. -------------------
+*------------------- -----------------------------------------------------------------------------------
+ *  - initial/final
+ *  - unicité
+ *  - adjacency
+ *  - cohérence pile (well-formed)
+ *  - occupancy (si position alors cellule occupée)
+ *  - actions (transmit/push/pop)
+ */
+
 Z3_ast tn_reduction(Z3_context ctx, const TunnelNetwork network, int length)
 {
-    return Z3_mk_false(ctx);
+    assert(length >= 1);
+
+    Z3_ast parts[6];
+    int p = 0;
+
+    parts[p++] = tn_condition_initial_and_final(ctx, network, length);
+    parts[p++] = tn_condition_uniqueness(ctx, network, length);
+    parts[p++] = tn_condition_edges(ctx, network, length);
+    parts[p++] = tn_condition_stack_wellformed(ctx, length);
+    parts[p++] = tn_condition_occupancy(ctx, network, length);
+    parts[p++] = tn_condition_actions(ctx, network, length);
+
+    return Z3_mk_and(ctx, p, parts);
 }
-
-
-
-/*les debut d'implementation des conditions de reduction des tunnels vers SAT
-** chaque condition est implementé par une fonction expecifique a l'exception du 
-**condition initial et final*/
-
-/*----------------- implementation du condition initial et final -------------------------------------------
-------------------- Condition initiale : on commence au nœud initial avec une pile vide (hauteur = 0) -------
-------------------- Condition finale : on termine au nœud final avec une pile vide (hauteur = 0)------------*/
-
-Z3_ast tn_condition_initial_and_final(Z3_context ctx, const TunnelNetwork network, int length){
-
-    // nombres des noeuds du reseaux
-    int nombre_noeud = tn_get_num_nodes(network);
-
-    //la hauteur maximal
-    int h_max = get_stack_size(length);
-
-    // condition  initial
-    int initial_noeud = tn_get_initial(network);
-
-    // un tableau dynamique pour stocker les contraintes logiques Z3.
-    Z3_ast *contrainte_initial = malloc(sizeof(Z3_ast)*nombre_noeud*h_max);
-
-    int indice = 0;
-    contrainte_initial[indice++]  = tn_path_variable(ctx,  initial_noeud,  0, 0);
-
-    for(int n=0; n<nombre_noeud; n++){
-        for(int h = 0 ; h<h_max; h++){
-            if (!(n==initial_noeud && h ==0)){
-                contrainte_initial[indice++]  = Z3_mk_not(ctx, tn_path_variable(ctx, n, 0, h));
-            }
-        }
-
-    }
-
-    Z3_ast init_formul = Z3_mk_and(ctx, indice, contrainte_initial);
-
-    // 🔹 Libère la mémoire temporaire du tableau de contraintes.
-    free(contrainte_initial);
-
-
-    //condition final
-        // noeud initial
-    int final_noeud = tn_get_final(network);
-
-    // un tableau dynamique pour stocker les contraintes logiques Z3.
-    Z3_ast *contrainte_finale = malloc(sizeof(Z3_ast)*nombre_noeud*h_max);
-
-    int indicef = 0;
-    contrainte_finale[indicef++]  = tn_path_variable(ctx,  final_noeud,  0, 0);
-
-    for(int n=0; n<nombre_noeud; n++){
-        for(int h = 0 ; h<h_max; h++){
-            if (!(n==final_noeud && h ==0)){
-                contrainte_finale[indicef++]  = Z3_mk_not(ctx, tn_path_variable(ctx, n, 0, h));
-            }
-        }
-
-    }
-
-    Z3_ast final_formul = Z3_mk_and(ctx, indicef, contrainte_finale);
-
-    free(contrainte_finale);
-
-    Z3_ast cond_init_final[2] = {init_formul, final_formul};
-
-    return Z3_mk_and(ctx, 2, cond_init_final);
-
-}
-
-
-
 
 
 void tn_get_path_from_model(Z3_context ctx, Z3_model model, TunnelNetwork network, int bound, tn_step *path)
