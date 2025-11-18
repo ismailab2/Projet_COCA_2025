@@ -234,3 +234,8 @@ tn_step tn_step_empty()
 {
     return tn_step_create(transmit_4, 0, 0);
 }
+
+//necessaire pour le brut force
+int tn_get_actions(TunnelNetwork network, int node) {
+    return network->node_actions[node];
+}
