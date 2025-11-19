@@ -235,7 +235,9 @@ tn_step tn_step_empty()
     return tn_step_create(transmit_4, 0, 0);
 }
 
-//necessaire pour le brut force
+//je pense que cette fonction est necessaire pour l'implementation du brut force dans TunnelBF.c
+//en effet, j'avais besoin de recuperer les actions possibles d'un noeud du graphe
+//j'ai donc utilisé cette fonction, qui recupere un mask d'action possible d'un noeud (dans le tableau node_actions) 
 int tn_get_actions(TunnelNetwork network, int node) {
     return network->node_actions[node];
 }
