@@ -214,4 +214,11 @@ tn_step tn_step_create(stack_action action, int source, int target);
  */
 tn_step tn_step_empty();
 
+/**
+ * @brief Get the mask of action possible for a specific node.
+ *
+ * @return int
+ */
+int tn_get_actions(TunnelNetwork network, int node);
+
 #endif
